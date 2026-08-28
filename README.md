@@ -3,6 +3,8 @@
 
 # QUACK🦆: Questioning, Understanding, and Auditing Collaborative Knowledge
 
+We are happy to announce that this project is accepted by EMNLP 2026! This repository contains the official implementation for the paper.
+
 ### A Multimodal Social Deduction Environment for Vision-Language Model Agents
 
 Recent work has increasingly used social deduction games to study reasoning, deception, coordination, and theory of mind in Large Language Model (LLM) agents. However, existing environments are typically evaluated through game outcomes such as win rates, and most remain limited to text-only interaction. As a result, it is difficult to determine whether an agent's reasoning is grounded in what it actually perceived and did, or to systematically identify the failure modes underlying its behavior.
