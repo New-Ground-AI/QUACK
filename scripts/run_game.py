@@ -127,6 +127,7 @@ def create_agents_from_config(
             requires_stream=cfg.model.get("requires_stream", False),
             provider=provider,
             max_tokens=cfg.model.get("max_tokens", None),
+            send_images=cfg.get("send_images", True),
         )
     return agents
 
@@ -169,6 +170,7 @@ def reassign_duck_agents(
                 requires_stream=duck_model_cfg.get("requires_stream", False),
                 provider=duck_provider,
                 max_tokens=duck_model_cfg.get("max_tokens", None),
+                send_images=cfg.get("send_images", True),
             )
             agents[pid] = new_agent
             engine.agents[pid] = new_agent
@@ -267,7 +269,11 @@ async def run_game(
     use_vlm = bool(api_key) or bool(anthropic_api_key)
 
     if use_vlm:
-        print(f"Creating {num_players} VLM agents (model: {cfg.model.display_name})...")
+        img_mode = "image+text" if cfg.get("send_images", True) else "TEXT-ONLY (images disabled)"
+        print(
+            f"Creating {num_players} VLM agents (model: {cfg.model.display_name}, "
+            f"input: {img_mode})..."
+        )
         agents = create_agents_from_config(
             cfg, api_key, num_players, anthropic_api_key=anthropic_api_key,
         )

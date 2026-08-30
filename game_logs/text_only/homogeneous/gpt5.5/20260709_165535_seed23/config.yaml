@@ -1,0 +1,138 @@
+game:
+  num_players: 6
+  num_ducks: 1
+  max_ticks: 200
+  tasks:
+    ticks_per_task: 3
+    tasks_per_player: 5
+  kill:
+    cooldown_ticks: 5
+    initial_cooldown: 5
+  meeting:
+    max_discussion_rounds: 2
+  vision:
+    visibility_range: 0
+    fog_memory_ticks: 0
+map:
+  rooms:
+    cafeteria:
+      x: 7
+      'y': 1
+      size: 3
+    weapons:
+      x: 13
+      'y': 1
+      size: 2
+    oxygen:
+      x: 1
+      'y': 1
+      size: 2
+    upper_engine:
+      x: 1
+      'y': 5
+      size: 2
+    medbay:
+      x: 5
+      'y': 5
+      size: 2
+    electrical:
+      x: 9
+      'y': 5
+      size: 2
+    security:
+      x: 13
+      'y': 5
+      size: 2
+    lower_engine:
+      x: 1
+      'y': 9
+      size: 2
+    storage:
+      x: 7
+      'y': 9
+      size: 3
+    navigation:
+      x: 13
+      'y': 9
+      size: 2
+  corridors:
+  - - oxygen
+    - cafeteria
+    - 2
+  - - cafeteria
+    - weapons
+    - 2
+  - - oxygen
+    - upper_engine
+    - 1
+  - - upper_engine
+    - lower_engine
+    - 2
+  - - cafeteria
+    - medbay
+    - 1
+  - - cafeteria
+    - electrical
+    - 2
+  - - medbay
+    - electrical
+    - 1
+  - - medbay
+    - storage
+    - 2
+  - - weapons
+    - security
+    - 1
+  - - electrical
+    - security
+    - 2
+  - - security
+    - navigation
+    - 2
+  - - lower_engine
+    - storage
+    - 2
+  - - storage
+    - navigation
+    - 3
+  - - upper_engine
+    - medbay
+    - 2
+  task_locations:
+  - room: upper_engine
+    name: Align Engine Output
+  - room: lower_engine
+    name: Fuel Engines
+  - room: medbay
+    name: Submit Scan
+  - room: electrical
+    name: Calibrate Distributor
+  - room: navigation
+    name: Chart Course
+  - room: weapons
+    name: Clear Asteroids
+  - room: oxygen
+    name: Clean O2 Filter
+  - room: storage
+    name: Sort Cargo
+  - room: security
+    name: Check Cameras
+  emergency_button: cafeteria
+model:
+  name: gpt5.5
+  display_name: GPT-5.5
+  model_id: gpt-5.5
+  temperature: null
+  requires_stream: false
+experiment:
+  type: homogeneous
+seed: 23
+render: true
+god_view: true
+video: true
+video_fps: 1
+speak_chinese: false
+send_images: false
+api_key: ''
+base_url: https://endpoint.greatrouter.com
+output_base: game_logs/text_only

@@ -12,6 +12,11 @@ god_view: true       # Generate god-view frames
 video: true          # Auto-generate video from frames
 video_fps: 1         # Frames per second for video
 speak_chinese: false
+# When true (default), each agent receives its rendered global map + local
+# view images alongside the structured text observation. Set to false for a
+# text-only ablation: agents then rely solely on the structured text summary
+# (no images sent to the VLM). See CHANGES.md.
+send_images: true
 
 # API configuration
 api_key: ""          # Override via command line or env var: QUACK_API_KEY

@@ -31,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from quack.evaluation.evaluator import BatchResult, GameEvaluator, EvaluationResult
 from quack.evaluation.report import format_batch_report, save_json_report
+from quack.evaluation.extraction_keys import resolve_extraction_api_key
+from quack.evaluation.tier3_statement_verification import extraction_output_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +97,12 @@ def main() -> None:
     parser.add_argument(
         "--model",
         default="gpt-5.5",
-        help="LLM model for Tier 3 claim extraction (default: gpt-5.5)",
+        help=(
+            "LLM model for Tier 3 claim extraction (default: gpt-5.5). "
+            "Also supports Claude, e.g. --model claude-opus-4-7 (routed "
+            "directly to the Anthropic API; key from $ANTHROPIC_API_KEY or "
+            "claude_key.txt)."
+        ),
     )
     parser.add_argument(
         "--map-config",
@@ -138,11 +145,13 @@ def main() -> None:
     )
 
     api_key = args.api_key
-    if args.tier3 and not api_key:
-        key_path = Path(__file__).resolve().parent.parent / "api_key.txt"
-        if key_path.exists():
-            api_key = key_path.read_text().strip()
-            print(f"Loaded API key from {key_path}")
+    if args.tier3:
+        root = Path(__file__).resolve().parent.parent
+        api_key = resolve_extraction_api_key(args.model, args.api_key, root)
+
+    # Non-default Tier 3 extraction models suffix their output filenames so
+    # they don't overwrite the default (gpt-5.5) results.
+    out_suffix = extraction_output_suffix(args.model) if args.tier3 else ""
 
     search_root = Path(args.log_dir)
     log_files = _discover_log_files(search_root)
@@ -176,7 +185,7 @@ def main() -> None:
 
             # Save per-game evaluation.json alongside the log if it's the new structure
             if log_file.name == "game.jsonl":
-                eval_path = log_file.parent / "evaluation.json"
+                eval_path = log_file.parent / f"evaluation{out_suffix}.json"
                 save_json_report(result, str(eval_path))
                 logger.info("Saved per-game evaluation to %s", eval_path)
 
@@ -213,7 +222,7 @@ def main() -> None:
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     for condition, results in sorted(condition_results.items()):
-        cond_filename = condition.replace("/", "_") + ".json"
+        cond_filename = condition.replace("/", "_") + f"{out_suffix}.json"
         cond_batch = BatchResult(
             num_games=len(results),
             results=results,
@@ -221,7 +230,7 @@ def main() -> None:
         )
         save_json_report(cond_batch, str(eval_dir / cond_filename))
 
-    save_json_report(overall_batch, str(eval_dir / "summary.json"))
+    save_json_report(overall_batch, str(eval_dir / f"summary{out_suffix}.json"))
     print(f"\nAggregated results saved to {eval_dir}/")
 
     if args.output:
@@ -274,6 +283,9 @@ def _build_aggregated(results: list[EvaluationResult]) -> dict[str, Any]:
                 "spatial_hallucination_rate", "deception_rate",
                 "deception_sophistication", "accusation_accuracy",
                 "unsupported_accusation_rate", "lie_detection_rate",
+                "directly_observed_accusation_rate",
+                "testimony_derived_accusation_rate",
+                "strictly_unsupported_accusation_rate",
             ],
         )
 

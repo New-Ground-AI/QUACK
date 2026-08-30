@@ -126,6 +126,7 @@ class VLMAgent(BaseAgent):
         requires_stream: bool = False,
         provider: str = "openai",
         max_tokens: int | None = None,
+        send_images: bool = True,
     ):
         super().__init__(player_id, name)
         self.provider = provider
@@ -135,6 +136,12 @@ class VLMAgent(BaseAgent):
         self.base_url = base_url
         self.speak_chinese = speak_chinese
         self.requires_stream = requires_stream
+        # Text-only ablation switch. When False, the rendered global map and
+        # local view images are NOT attached to VLM requests; the agent then
+        # relies solely on the structured text observation. The images are
+        # still received via ``set_images`` (the engine renders them for the
+        # god-view video regardless) but ``_collect_images`` drops them.
+        self.send_images = send_images
         # Anthropic's Messages API requires ``max_tokens`` on every call.
         # OpenAI-compatible providers (greatrouter) ignore it for non-streaming
         # frontier models, so we only forward it when the model config sets it.
@@ -197,6 +204,7 @@ class VLMAgent(BaseAgent):
             teammates=teammates,
             all_players=all_players,
             speak_chinese=self.speak_chinese,
+            send_images=self.send_images,
         )
         self.memory = AgentMemory(self.name)
 
@@ -270,6 +278,9 @@ class VLMAgent(BaseAgent):
         )
 
     def _collect_images(self) -> list[Image.Image]:
+        # Text-only ablation: skip attaching any images to the VLM request.
+        if not self.send_images:
+            return []
         imgs: list[Image.Image] = []
         if self._global_map_image:
             imgs.append(self._global_map_image)

@@ -17,6 +17,7 @@ from quack.evaluation.tier2_behavioral import Tier2Metrics, compute_tier2_metric
 from quack.evaluation.tier3_statement_verification import (
     StatementVerificationPipeline,
     Tier3Metrics,
+    extraction_output_suffix,
 )
 from quack.map.game_map import GameMap
 
@@ -170,7 +171,10 @@ class GameEvaluator:
                 # source the metrics were computed from.
                 if save_tier3_audit and pipeline.claim_audits:
                     audit_dir = Path(log_path).parent
-                    audit_path = audit_dir / "tier3_claims.jsonl"
+                    # Non-default extraction models get a model-slug suffix so
+                    # e.g. a Claude run doesn't overwrite the gpt-5.5 audit.
+                    suffix = extraction_output_suffix(llm_model)
+                    audit_path = audit_dir / f"tier3_claims{suffix}.jsonl"
                     with open(audit_path, "w") as f:
                         for entry in pipeline.claim_audits:
                             f.write(json.dumps(entry, default=str) + "\n")
@@ -286,6 +290,9 @@ class BatchEvaluator:
                     "spatial_hallucination_rate", "deception_rate",
                     "deception_sophistication", "accusation_accuracy",
                     "unsupported_accusation_rate", "lie_detection_rate",
+                    "directly_observed_accusation_rate",
+                    "testimony_derived_accusation_rate",
+                    "strictly_unsupported_accusation_rate",
                 ],
             )
 

@@ -15,7 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from quack.evaluation.evaluator import GameEvaluator
+from quack.evaluation.extraction_keys import resolve_extraction_api_key
 from quack.evaluation.report import format_game_report, save_json_report
+from quack.evaluation.tier3_statement_verification import extraction_output_suffix
 
 
 def main() -> None:
@@ -44,7 +46,12 @@ def main() -> None:
     parser.add_argument(
         "--model",
         default="gpt-5.5",
-        help="LLM model for Tier 3 claim extraction (default: gpt-5.5)",
+        help=(
+            "LLM model for Tier 3 claim extraction (default: gpt-5.5). "
+            "Also supports Claude, e.g. --model claude-opus-4-7 (routed "
+            "directly to the Anthropic API; key from $ANTHROPIC_API_KEY or "
+            "claude_key.txt)."
+        ),
     )
     parser.add_argument(
         "--map-config",
@@ -87,13 +94,9 @@ def main() -> None:
     )
 
     api_key = args.api_key
-    if args.tier3 and not api_key:
-        key_path = Path(__file__).resolve().parent.parent / "api_key.txt"
-        if key_path.exists():
-            api_key = key_path.read_text().strip()
-            print(f"Loaded API key from {key_path}")
-        else:
-            print("WARNING: --tier3 requires an API key. Provide --api-key or create api_key.txt")
+    if args.tier3:
+        root = Path(__file__).resolve().parent.parent
+        api_key = resolve_extraction_api_key(args.model, args.api_key, root)
 
     evaluator = GameEvaluator(map_config_path=args.map_config)
 
@@ -113,12 +116,17 @@ def main() -> None:
     report = format_game_report(result)
     print(report)
 
-    # Determine output path: explicit flag > auto-detect alongside game.jsonl
+    # Determine output path: explicit flag > auto-detect alongside game.jsonl.
+    # For a non-default Tier 3 extraction model, the auto-detected filename
+    # gets a model-slug suffix (e.g. evaluation_claude-opus-4-7.json) so it
+    # doesn't overwrite the default gpt-5.5 evaluation.json. An explicit
+    # --output is always respected as-is.
     output_path = args.output
     if output_path is None:
         log_p = Path(args.log_path)
         if log_p.name == "game.jsonl":
-            output_path = str(log_p.parent / "evaluation.json")
+            suffix = extraction_output_suffix(args.model) if args.tier3 else ""
+            output_path = str(log_p.parent / f"evaluation{suffix}.json")
         else:
             output_path = None
 

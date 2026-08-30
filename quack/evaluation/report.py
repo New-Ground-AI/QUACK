@@ -85,6 +85,13 @@ def format_game_report(result: EvaluationResult) -> str:
         )
         lines.append(f"  Lie detection rate: {t3.lie_detection_rate * 100:.1f}%")
         lines.append(f"  Accusation accuracy: {t3.accusation_accuracy * 100:.1f}%")
+        lines.append(
+            "  Accusation basis: "
+            f"directly-observed {t3.directly_observed_accusations}, "
+            f"testimony-derived {t3.testimony_derived_accusations}, "
+            f"unsupported {t3.unsupported_accusations} "
+            f"(unsupported rate: {t3.strictly_unsupported_accusation_rate * 100:.1f}%)"
+        )
 
         if t3.claim_type_distribution:
             dist_str = ", ".join(

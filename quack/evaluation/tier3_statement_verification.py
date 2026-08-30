@@ -302,6 +302,24 @@ class Tier3Metrics:
     ungrounded_accusations: int = 0
     unsupported_accusation_rate: float = 0.0
 
+    # Three-way accusation basis taxonomy (ARR May reviewer request). This
+    # refines the legacy binary grounded/ungrounded split: the old
+    # ``ungrounded`` bucket is now separated into ``testimony_derived`` (the
+    # accuser echoed another player's earlier testimony about the target) and
+    # ``unsupported`` (no observation and no prior testimony). Identities:
+    #   directly_observed_accusations == grounded_accusations
+    #   testimony_derived + unsupported == ungrounded_accusations
+    # The legacy fields above are kept unchanged for backward compatibility.
+    directly_observed_accusations: int = 0
+    testimony_derived_accusations: int = 0
+    unsupported_accusations: int = 0
+    directly_observed_accusation_rate: float = 0.0
+    testimony_derived_accusation_rate: float = 0.0
+    # Strict "unsupported" rate over the three-way taxonomy (neither observed
+    # nor testimony-derived). Distinct from the legacy
+    # ``unsupported_accusation_rate`` which is the broader ungrounded rate.
+    strictly_unsupported_accusation_rate: float = 0.0
+
     meetings_with_duck_lies: int = 0
     meetings_duck_caught_after_lie: int = 0
     lie_detection_rate: float = 0.0
@@ -340,6 +358,12 @@ class Tier3Metrics:
             "grounded_accusations": self.grounded_accusations,
             "ungrounded_accusations": self.ungrounded_accusations,
             "unsupported_accusation_rate": self.unsupported_accusation_rate,
+            "directly_observed_accusations": self.directly_observed_accusations,
+            "testimony_derived_accusations": self.testimony_derived_accusations,
+            "unsupported_accusations": self.unsupported_accusations,
+            "directly_observed_accusation_rate": self.directly_observed_accusation_rate,
+            "testimony_derived_accusation_rate": self.testimony_derived_accusation_rate,
+            "strictly_unsupported_accusation_rate": self.strictly_unsupported_accusation_rate,
             "meetings_with_duck_lies": self.meetings_with_duck_lies,
             "meetings_duck_caught_after_lie": self.meetings_duck_caught_after_lie,
             "lie_detection_rate": self.lie_detection_rate,
@@ -349,8 +373,15 @@ class Tier3Metrics:
         }
 
 
-def normalize_room_name(name: str) -> str | None:
-    """Normalize a room name string to canonical form, or None if unrecognized."""
+def normalize_room_name(name: str | None) -> str | None:
+    """Normalize a room name string to canonical form, or None if unrecognized.
+
+    Tolerates ``None`` / empty input (returns ``None``): a location claim may
+    carry ``room=None`` (e.g. a route-only or malformed claim), and callers
+    already treat a ``None`` result as "no recognizable room" -> unverifiable.
+    """
+    if not name:
+        return None
     cleaned = name.strip().lower().replace("-", "_")
     if cleaned in ROOM_NAMES:
         return cleaned
@@ -1454,12 +1485,49 @@ class ExtractionCache:
             logger.warning("Failed to append to extraction cache %s: %s", self.path, e)
 
 
+# Default Tier 3 extraction model. Outputs from this model keep their
+# historical, un-suffixed filenames (``evaluation.json`` /
+# ``tier3_claims.jsonl``) for backward compatibility; other extraction
+# models get a model-slug suffix so their outputs don't overwrite the
+# default's (see ``extraction_output_suffix``).
+DEFAULT_EXTRACTION_MODEL = "gpt-5.5"
+
+
+def extraction_output_suffix(model: str) -> str:
+    """Filename suffix for outputs produced by a given extraction model.
+
+    Returns ``""`` for the default model (:data:`DEFAULT_EXTRACTION_MODEL`),
+    so its ``evaluation.json`` / ``tier3_claims.jsonl`` keep their historical
+    names. For any other model, returns ``"_<sanitized-model>"`` (slashes in
+    LiteLLM provider prefixes like ``anthropic/`` become underscores), e.g.
+    ``"_claude-opus-4-7"``. This lets two extraction models be evaluated over
+    the same game log without overwriting each other's results.
+    """
+    if not model or model == DEFAULT_EXTRACTION_MODEL:
+        return ""
+    slug = model.replace("/", "_")
+    return f"_{slug}"
+
+
+def is_anthropic_extraction_model(model: str) -> bool:
+    """Return True if ``model`` should be routed to the Anthropic API.
+
+    Recognizes both the bare Anthropic model ids used elsewhere in the repo
+    (e.g. ``claude-opus-4-7``, matching ``configs/model/claude_opus4.7.yaml``)
+    and LiteLLM's explicit ``anthropic/`` provider prefix. Used by the Tier 3
+    extraction path and by the evaluation CLIs (to pick the right API key).
+    """
+    m = (model or "").strip().lower()
+    return m.startswith("anthropic/") or m.startswith("claude")
+
+
 def _call_extraction_llm(
     *,
     model: str,
     prompt: str,
     api_key: str,
     base_url: str,
+    max_tokens: int | None = None,
 ) -> str:
     """Call the LLM for a single claim-extraction prompt.
 
@@ -1493,8 +1561,24 @@ def _call_extraction_llm(
     }
     if api_key:
         kwargs["api_key"] = api_key
-    if base_url:
+
+    if is_anthropic_extraction_model(model):
+        # Native Claude (e.g. claude-opus-4-7). Route directly to the
+        # Anthropic API via LiteLLM's ``anthropic/`` provider prefix. The
+        # greatrouter proxy heavily rate-limits Claude, so — as with the
+        # game agents (see run_game.py) — we hit api.anthropic.com directly.
+        if not model.startswith("anthropic/"):
+            kwargs["model"] = f"anthropic/{model}"
+        # Anthropic's Messages API requires ``max_tokens`` on every call.
+        kwargs["max_tokens"] = max_tokens or 4096
+        # Only forward a base_url that is actually Anthropic-compatible; an
+        # OpenAI/greatrouter base_url would misroute the request. Passing an
+        # empty/None base_url lets LiteLLM use the Anthropic default.
+        if base_url and "anthropic" in base_url.lower():
+            kwargs["base_url"] = base_url
+    elif base_url:
         kwargs["base_url"] = base_url
+
     response = litellm.completion(**kwargs)
     return response.choices[0].message.content.strip()
 
@@ -1608,6 +1692,17 @@ def _extract_claims_sync(
         cache.set(key, claims)
 
     return claims, False
+
+
+def _mentions_player(message: str, name: str) -> bool:
+    """Case-insensitive whole-word check for a player name in a message.
+
+    Player names are single tokens (e.g. ``Alice``), so a word-boundary
+    match avoids matching substrings inside other words.
+    """
+    if not name or not message:
+        return False
+    return re.search(rf"\b{re.escape(name)}\b", message, re.IGNORECASE) is not None
 
 
 class StatementVerificationPipeline:
@@ -1964,7 +2059,7 @@ class StatementVerificationPipeline:
             )
 
     def _verify_accusation(self, claim: dict[str, Any]) -> VerificationResult:
-        """Verify an accusation claim along TWO independent axes (Bug D).
+        """Verify an accusation claim along independent axes (Bug D).
 
         1. **Outcome** (was the guess correct): hit/miss based on the
            target's actual role. Reported as ``accusation_outcome`` in
@@ -1974,6 +2069,11 @@ class StatementVerificationPipeline:
            or body, or shared room/visibility at any tick. Reported as
            ``accusation_grounded`` (bool) and ``grounding_reason`` in
            ``evidence``, and aggregated into ``unsupported_accusation_rate``.
+        3. **Basis taxonomy** (ARR May reviewer request): a three-way refinement
+           of the groundedness axis — ``directly_observed`` /
+           ``testimony_derived`` / ``unsupported``. Reported as
+           ``accusation_basis`` in ``evidence`` and aggregated into the
+           ``*_accusation_rate`` triad. See :meth:`_classify_accusation_basis`.
 
         The verdict field uses ``true`` if the accused is a Duck (outcome
         ``hit``) and ``false`` otherwise (outcome ``miss``). That keeps
@@ -1998,6 +2098,7 @@ class StatementVerificationPipeline:
                 evidence={
                     "accusation_outcome": "unknown",
                     "accusation_grounded": False,
+                    "accusation_basis": "unsupported",
                     "grounding_reason": "target_not_in_registry",
                 },
             )
@@ -2005,11 +2106,23 @@ class StatementVerificationPipeline:
         is_duck = target_id in self.duck_ids
         outcome = "hit" if is_duck else "miss"
 
-        grounded, grounding_reason = self._is_accusation_grounded(
+        # Reviewer-requested three-way basis taxonomy (ARR May rebuttal):
+        #   directly_observed  — the accuser personally observed the target
+        #   testimony_derived  — the accuser had no direct observation but
+        #                         another player named/accused the target
+        #                         earlier in the same meeting
+        #   unsupported        — neither observation nor prior testimony
+        basis, grounding_reason = self._classify_accusation_basis(
             accuser_id=accuser_id,
             target_id=target_id,
             meeting_tick=int(claim.get("_meeting_tick", 0)),
+            meeting_idx=int(claim.get("_meeting_idx", 0)),
         )
+        # ``accusation_grounded`` (bool) is preserved for backward
+        # compatibility: it equals "directly observed". The legacy
+        # ``ungrounded`` bucket (== not directly observed) is now split into
+        # ``testimony_derived`` + ``unsupported`` by ``accusation_basis``.
+        grounded = basis == "directly_observed"
 
         evidence: dict[str, Any] = {
             "accuser_id": accuser_id,
@@ -2017,6 +2130,7 @@ class StatementVerificationPipeline:
             "target_is_duck": is_duck,
             "accusation_outcome": outcome,
             "accusation_grounded": grounded,
+            "accusation_basis": basis,
             "grounding_reason": grounding_reason,
         }
 
@@ -2025,7 +2139,7 @@ class StatementVerificationPipeline:
                 verdict="true",
                 reason=(
                     f"Target '{target_name}' is a Duck (outcome=hit, "
-                    f"grounded={grounded}: {grounding_reason})."
+                    f"basis={basis}: {grounding_reason})."
                 ),
                 evidence=evidence, verifier_name=verifier_name,
             )
@@ -2033,7 +2147,7 @@ class StatementVerificationPipeline:
             verdict="false",
             reason=(
                 f"Target '{target_name}' is not a Duck (outcome=miss, "
-                f"grounded={grounded}: {grounding_reason})."
+                f"basis={basis}: {grounding_reason})."
             ),
             evidence=evidence, verifier_name=verifier_name,
         )
@@ -2107,6 +2221,111 @@ class StatementVerificationPipeline:
                 return True, "accuser_could_see_target"
 
         return False, "no_observational_basis"
+
+    def _classify_accusation_basis(
+        self,
+        accuser_id: str,
+        target_id: str,
+        meeting_tick: int,
+        meeting_idx: int,
+    ) -> tuple[str, str]:
+        """Classify an accusation's evidential basis into one of three
+        categories (ARR May reviewer request).
+
+        Returns ``(basis, reason)`` where ``basis`` is one of:
+
+        * ``"directly_observed"`` — the accuser, while alive, personally had
+          an observational basis (visibility on the target, co-location at a
+          kill/body scene, or calling the meeting). This is exactly the old
+          binary "grounded" condition, delegated to
+          :meth:`_is_accusation_grounded`.
+        * ``"testimony_derived"`` — the accuser had NO direct observation, but
+          another player named or accused the target earlier in the same
+          meeting's discussion (before the accuser first spoke). The
+          accusation is plausibly derived from that testimony rather than from
+          nothing.
+        * ``"unsupported"`` — neither direct observation nor prior testimony:
+          the paper's true "unsupported accusation" failure mode.
+
+        The precedence is direct observation > testimony > unsupported, so an
+        accusation the accuser could have made on their own is always credited
+        as directly observed even if others also mentioned the target.
+        """
+        grounded, reason = self._is_accusation_grounded(
+            accuser_id=accuser_id,
+            target_id=target_id,
+            meeting_tick=meeting_tick,
+        )
+        if grounded:
+            return "directly_observed", reason
+
+        if self._accusation_supported_by_testimony(
+            accuser_id=accuser_id,
+            target_id=target_id,
+            meeting_idx=meeting_idx,
+        ):
+            return "testimony_derived", "prior_testimony_named_target"
+
+        return "unsupported", reason
+
+    def _accusation_supported_by_testimony(
+        self,
+        accuser_id: str,
+        target_id: str,
+        meeting_idx: int,
+    ) -> bool:
+        """Return True if another player named the target earlier in the
+        same meeting, before the accuser first spoke.
+
+        Uses the ordered discussion messages of the meeting (as gathered by
+        :meth:`_gather_meetings`). Only messages strictly before the accuser's
+        first utterance count, and messages from the accuser themselves are
+        ignored — the point is whether the accuser could have been repeating
+        someone else's testimony.
+        """
+        if not accuser_id or not target_id or accuser_id == target_id:
+            return False
+
+        meetings = self._get_meetings_cached()
+        if meeting_idx < 0 or meeting_idx >= len(meetings):
+            return False
+
+        messages = meetings[meeting_idx]["messages"]
+        target_name = self.id_to_name.get(target_id, "")
+        if not target_name:
+            return False
+
+        # Index of the accuser's first utterance in this meeting.
+        first_accuser_idx: int | None = None
+        for i, m in enumerate(messages):
+            if m.get("player_id") == accuser_id:
+                first_accuser_idx = i
+                break
+
+        # If the accuser never appears in the discussion (unexpected for an
+        # extracted claim), fall back to scanning all messages.
+        upto = first_accuser_idx if first_accuser_idx is not None else len(messages)
+        for m in messages[:upto]:
+            if m.get("player_id") == accuser_id:
+                continue
+            if _mentions_player(m.get("message", ""), target_name):
+                return True
+        return False
+
+    def _get_meetings_cached(self) -> list[dict[str, Any]]:
+        """Lazily gather + cache meetings so per-accusation testimony lookups
+        don't re-scan the whole event log each time.
+
+        Uses ``getattr`` for the cache attribute so this also works when the
+        pipeline is constructed via ``__new__`` (e.g. the offline
+        ``reverify_tier3_from_audit.py`` path), which doesn't run
+        ``__init__``.
+        """
+        cache = getattr(self, "_meetings_cache", None)
+        if cache is None:
+            cache = self._gather_meetings()
+            self._meetings_cache = cache
+        return cache
 
     def _temporal_resolution_source(self, meeting_tick: int) -> str:
         """Label how the temporal window was resolved for this meeting."""
@@ -2348,6 +2567,9 @@ class StatementVerificationPipeline:
         accusations_false = 0
         accusations_grounded = 0
         accusations_ungrounded = 0
+        accusations_directly_observed = 0
+        accusations_testimony_derived = 0
+        accusations_unsupported = 0
 
         for claim in all_claims:
             claim_type = claim.get("type", "unknown")
@@ -2368,6 +2590,9 @@ class StatementVerificationPipeline:
                     "near_miss": 0, "unverifiable": 0,
                     "accusation_hits": 0, "accusation_misses": 0,
                     "accusation_ungrounded": 0,
+                    "accusation_directly_observed": 0,
+                    "accusation_testimony_derived": 0,
+                    "accusation_unsupported": 0,
                 }
             per_player[speaker_name]["total"] += 1
 
@@ -2422,13 +2647,26 @@ class StatementVerificationPipeline:
                 accusations_total += 1
                 evidence = claim.get("_verification")
                 grounded = False
+                basis = "unsupported"
                 if evidence is not None:
                     grounded = bool(evidence.evidence.get("accusation_grounded", False))
+                    basis = evidence.evidence.get("accusation_basis", "unsupported")
+                # Legacy binary axis (kept for backward compatibility).
                 if grounded:
                     accusations_grounded += 1
                 else:
                     accusations_ungrounded += 1
                     per_player[speaker_name]["accusation_ungrounded"] += 1
+                # Three-way basis taxonomy (reviewer request).
+                if basis == "directly_observed":
+                    accusations_directly_observed += 1
+                    per_player[speaker_name]["accusation_directly_observed"] += 1
+                elif basis == "testimony_derived":
+                    accusations_testimony_derived += 1
+                    per_player[speaker_name]["accusation_testimony_derived"] += 1
+                else:
+                    accusations_unsupported += 1
+                    per_player[speaker_name]["accusation_unsupported"] += 1
                 if verdict == "true":
                     accusations_correct += 1
                     per_player[speaker_name]["accusation_hits"] += 1
@@ -2473,6 +2711,23 @@ class StatementVerificationPipeline:
         metrics.ungrounded_accusations = accusations_ungrounded
         metrics.unsupported_accusation_rate = (
             accusations_ungrounded / accusations_total if accusations_total > 0 else 0.0
+        )
+
+        # Three-way basis taxonomy (reviewer request).
+        metrics.directly_observed_accusations = accusations_directly_observed
+        metrics.testimony_derived_accusations = accusations_testimony_derived
+        metrics.unsupported_accusations = accusations_unsupported
+        metrics.directly_observed_accusation_rate = (
+            accusations_directly_observed / accusations_total
+            if accusations_total > 0 else 0.0
+        )
+        metrics.testimony_derived_accusation_rate = (
+            accusations_testimony_derived / accusations_total
+            if accusations_total > 0 else 0.0
+        )
+        metrics.strictly_unsupported_accusation_rate = (
+            accusations_unsupported / accusations_total
+            if accusations_total > 0 else 0.0
         )
 
         # Lie detection

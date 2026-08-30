@@ -1,25 +1,31 @@
 """Offline re-verify: re-run Tier 3 verification on the structured claims
-already present in an existing ``tier3_claims.jsonl`` (skipping the LLM
-extraction step).
+already present in existing ``tier3_claims.jsonl`` audit files (skipping the
+LLM extraction step).
 
-Use this to demonstrate the impact of Tier 3 verifier-side fixes (Bug A,
-B, D, F) without re-paying for LLM extraction. The extraction step
-(Bug C / cache / dedup) is a separate concern and not exercised here.
+Use this to demonstrate the impact of Tier 3 verifier-side changes (e.g. the
+directly-observed / testimony-derived / unsupported accusation taxonomy, or
+Bug A/B/D/F fixes) without re-paying for LLM extraction. The extraction step
+(cache / dedup) is a separate concern and not exercised here.
 
-Outputs alongside the input run directory:
+Works on either a single run directory OR a whole setting directory:
+
+- **Single run** — a directory that directly contains ``tier3_claims.jsonl``.
+- **Batch** — any parent directory; every run under it (found recursively by
+  its ``tier3_claims.jsonl``) is re-verified, and an aggregate accusation
+  summary across all runs is printed and written to
+  ``<root>/reverify_summary.json``.
+
+Outputs written alongside each run directory:
 - ``tier3_claims_reverified.jsonl`` — same structured claims, new verdicts
 - ``evaluation_reverified.json``   — Tier 3 metrics computed from the new verdicts
 
 Run::
 
-    python scripts/reverify_tier3_from_audit.py game_logs/<run_dir>/
+    # one run
+    python scripts/reverify_tier3_from_audit.py game_logs/homogeneous/gpt5.5/<run>/
 
-Then::
-
-    python scripts/validate_tier3_audit.py --check game_logs/<run_dir>/
-
-… would normally check the live tier3_claims.jsonl + evaluation.json
-(the reverified shadow files are not picked up automatically).
+    # every run in a setting
+    python scripts/reverify_tier3_from_audit.py game_logs/homogeneous/gpt5.5/
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -35,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from quack.evaluation.game_reconstructor import GameReconstructor
 from quack.evaluation.log_parser import (
-    get_initial_state, get_player_role_map, parse_log,
+    get_game_config, get_initial_state, get_player_role_map, parse_log,
 )
 from quack.evaluation.tier3_statement_verification import (
     StatementVerificationPipeline, Tier3Metrics,
@@ -44,16 +51,36 @@ from quack.evaluation.tier3_statement_verification import (
 from quack.map.game_map import GameMap
 
 
-def reverify(run_dir: Path, map_yaml: Path) -> None:
+def _load_game_map(events: list[dict], default_map_yaml: Path) -> GameMap:
+    """Resolve the game map for a run, preferring the map recorded in the log
+    (matching ``GameEvaluator``), falling back to ``default_map_yaml``.
+    """
+    map_path = get_game_config(events).get("map")
+    if map_path and Path(map_path).exists():
+        with open(map_path) as f:
+            return GameMap.from_config(yaml.safe_load(f))
+    with open(default_map_yaml) as f:
+        return GameMap.from_config(yaml.safe_load(f))
+
+
+def reverify_run(
+    run_dir: Path,
+    map_yaml: Path,
+) -> tuple[Tier3Metrics, dict[str, int]] | None:
+    """Re-verify a single run directory.
+
+    Returns ``(metrics, verdict_diff)`` on success, or ``None`` if the run has
+    no ``tier3_claims.jsonl`` to re-verify. Writes
+    ``tier3_claims_reverified.jsonl`` + ``evaluation_reverified.json`` into
+    ``run_dir``.
+    """
     game_log = run_dir / "game.jsonl"
     audit_path = run_dir / "tier3_claims.jsonl"
     if not audit_path.exists():
-        print(f"ERROR: no tier3_claims.jsonl in {run_dir}", file=sys.stderr)
-        sys.exit(1)
+        return None
 
     events = parse_log(str(game_log))
-    with open(map_yaml) as f:
-        game_map = GameMap.from_config(yaml.safe_load(f))
+    game_map = _load_game_map(events, map_yaml)
     timeline = GameReconstructor(events, game_map).reconstruct()
 
     pipeline = StatementVerificationPipeline.__new__(StatementVerificationPipeline)
@@ -74,8 +101,6 @@ def reverify(run_dir: Path, map_yaml: Path) -> None:
             if line.strip():
                 audits_in.append(json.loads(line))
 
-    print(f"Loaded {len(audits_in)} audit entries from {audit_path}")
-
     # Group existing audits by meeting so we can rebuild meeting context.
     meetings_by_idx: dict[int, dict] = {}
     for a in audits_in:
@@ -87,11 +112,11 @@ def reverify(run_dir: Path, map_yaml: Path) -> None:
                 "caller": a["meeting"]["caller_id"],
             }
 
-    # Apply Bug C dedup to the input audits before re-verifying, so the
-    # output mirrors what a full re-run of the pipeline (with extraction
-    # cache + dedup) would produce. Duplicates from the OLD pipeline get
-    # collapsed here. ``dedup_collapsed_n`` is summed per (speaker,
-    # meeting) so the surviving entry carries the dropped count.
+    # Apply dedup to the input audits before re-verifying, so the output
+    # mirrors what a full re-run of the pipeline (with extraction cache +
+    # dedup) would produce. Duplicates from the OLD pipeline get collapsed
+    # here. ``dedup_collapsed_n`` is summed per (speaker, meeting) so the
+    # surviving entry carries the dropped count.
     seen: set[tuple[str, int, tuple]] = set()
     collapsed_by_key: dict[tuple[str, int], int] = {}
     deduped_in: list[dict] = []
@@ -114,7 +139,6 @@ def reverify(run_dir: Path, map_yaml: Path) -> None:
         deduped_in.append(a)
 
     audits_in = deduped_in
-    print(f"After Bug C dedup: {len(audits_in)} unique claims (dropped {sum(collapsed_by_key.values())})")
 
     all_verified: list[dict] = []
     new_audits: list[dict] = []
@@ -201,20 +225,152 @@ def reverify(run_dir: Path, map_yaml: Path) -> None:
     with open(out_eval, "w") as f:
         json.dump({"tier3": metrics.to_dict()}, f, indent=2, default=str)
 
-    print("\nVerdict transitions (old -> new):")
-    for k, v in sorted(verdict_diff.items(), key=lambda x: -x[1]):
+    return metrics, verdict_diff
+
+
+def _print_accusation_summary(metrics: Tier3Metrics, indent: str = "  ") -> None:
+    total = metrics.total_accusations
+    print(f"{indent}total accusations:       {total:>4}")
+    print(f"{indent}directly-observed:       {metrics.directly_observed_accusations:>4} "
+          f"({metrics.directly_observed_accusation_rate * 100:.1f}%)")
+    print(f"{indent}testimony-derived:       {metrics.testimony_derived_accusations:>4} "
+          f"({metrics.testimony_derived_accusation_rate * 100:.1f}%)")
+    print(f"{indent}unsupported:             {metrics.unsupported_accusations:>4} "
+          f"({metrics.strictly_unsupported_accusation_rate * 100:.1f}%)")
+    print(f"{indent}accusation accuracy:     {metrics.accusation_accuracy * 100:.1f}%")
+
+
+def _discover_run_dirs(root: Path) -> list[Path]:
+    """Find every run directory under ``root`` that has a tier3_claims.jsonl.
+
+    ``rglob`` includes ``root`` itself, so a single run directory passed
+    directly is handled the same way (yields exactly one match).
+    """
+    return sorted({p.parent for p in root.rglob("tier3_claims.jsonl")})
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "path", type=str,
+        help="A run directory (with game.jsonl + tier3_claims.jsonl) OR a "
+             "parent/setting directory containing many such runs",
+    )
+    parser.add_argument("--map-config", type=str,
+                        default="configs/maps/simple_ship.yaml",
+                        help="Fallback map config YAML (used when a run's log "
+                             "doesn't record a resolvable map path)")
+    args = parser.parse_args()
+
+    root = Path(args.path)
+    if not root.exists():
+        print(f"ERROR: path does not exist: {root}", file=sys.stderr)
+        sys.exit(1)
+
+    map_yaml = Path(args.map_config)
+    run_dirs = _discover_run_dirs(root)
+    if not run_dirs:
+        print(f"ERROR: no tier3_claims.jsonl found under {root}", file=sys.stderr)
+        print("       (run --tier3 evaluation first to produce the audit files)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    batch = len(run_dirs) > 1
+    print(f"Found {len(run_dirs)} run(s) with tier3_claims.jsonl under {root}")
+    print("=" * 60)
+
+    # Aggregators across all runs.
+    agg_verdict_diff: dict[str, int] = {}
+    agg = Tier3Metrics()
+    per_run_summary: list[dict[str, Any]] = []
+    processed = 0
+    failed = 0
+
+    for run_dir in run_dirs:
+        rel = run_dir.relative_to(root) if run_dir != root else Path(".")
+        try:
+            result = reverify_run(run_dir, map_yaml)
+        except Exception as e:  # keep going across a batch
+            print(f"[FAIL] {rel}: {e}")
+            failed += 1
+            continue
+        if result is None:
+            continue
+        metrics, verdict_diff = result
+        processed += 1
+
+        for k, v in verdict_diff.items():
+            agg_verdict_diff[k] = agg_verdict_diff.get(k, 0) + v
+
+        # Sum the accusation counters we aggregate on.
+        agg.total_accusations += metrics.total_accusations
+        agg.correct_accusations += metrics.correct_accusations
+        agg.false_accusations += metrics.false_accusations
+        agg.grounded_accusations += metrics.grounded_accusations
+        agg.ungrounded_accusations += metrics.ungrounded_accusations
+        agg.directly_observed_accusations += metrics.directly_observed_accusations
+        agg.testimony_derived_accusations += metrics.testimony_derived_accusations
+        agg.unsupported_accusations += metrics.unsupported_accusations
+
+        per_run_summary.append({
+            "run_dir": str(run_dir),
+            "tier3": metrics.to_dict(),
+        })
+
+        if batch:
+            print(
+                f"[ok] {rel}: "
+                f"acc={metrics.total_accusations} "
+                f"(obs {metrics.directly_observed_accusations} / "
+                f"test {metrics.testimony_derived_accusations} / "
+                f"unsup {metrics.unsupported_accusations})"
+            )
+        else:
+            print(f"\nRun: {rel}")
+            print("\nVerdict transitions (old -> new):")
+            for k, v in sorted(verdict_diff.items(), key=lambda x: -x[1]):
+                if v > 0:
+                    print(f"  {k:<30} {v:>4}")
+            print("\nAccusation basis (re-verified from cached claims):")
+            _print_accusation_summary(metrics)
+
+    # Recompute aggregate rates from the summed counts.
+    t = agg.total_accusations
+    if t > 0:
+        agg.accusation_accuracy = agg.correct_accusations / t
+        agg.unsupported_accusation_rate = agg.ungrounded_accusations / t
+        agg.directly_observed_accusation_rate = agg.directly_observed_accusations / t
+        agg.testimony_derived_accusation_rate = agg.testimony_derived_accusations / t
+        agg.strictly_unsupported_accusation_rate = agg.unsupported_accusations / t
+
+    print("\n" + "=" * 60)
+    print(f"AGGREGATE over {processed} run(s)"
+          + (f" ({failed} failed)" if failed else ""))
+    print("=" * 60)
+    print("\nAccusation basis (summed across runs):")
+    _print_accusation_summary(agg)
+    print("\nVerdict transitions (old -> new), summed:")
+    for k, v in sorted(agg_verdict_diff.items(), key=lambda x: -x[1]):
         if v > 0:
             print(f"  {k:<30} {v:>4}")
-    print(f"\nWrote {out_audit}")
-    print(f"Wrote {out_eval}")
+
+    # Write an aggregate summary next to the root for downstream analysis.
+    summary_path = root / "reverify_summary.json"
+    with open(summary_path, "w") as f:
+        json.dump(
+            {
+                "root": str(root),
+                "num_runs": processed,
+                "num_failed": failed,
+                "aggregate_tier3": agg.to_dict(),
+                "aggregate_verdict_transitions": agg_verdict_diff,
+                "per_run": per_run_summary,
+            },
+            f, indent=2, default=str,
+        )
+    print(f"\nWrote aggregate summary to {summary_path}")
+    print("Per-run outputs: tier3_claims_reverified.jsonl + evaluation_reverified.json")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("run_dir", type=str,
-                        help="Directory containing game.jsonl + tier3_claims.jsonl")
-    parser.add_argument("--map-config", type=str,
-                        default="configs/maps/simple_ship.yaml",
-                        help="Path to map config YAML")
-    args = parser.parse_args()
-    reverify(Path(args.run_dir), Path(args.map_config))
+    main()

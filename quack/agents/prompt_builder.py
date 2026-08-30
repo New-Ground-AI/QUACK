@@ -126,8 +126,16 @@ def build_system_prompt(
     teammates: list[str] | None = None,
     all_players: list[str] | None = None,
     speak_chinese: bool = False,
+    send_images: bool = True,
 ) -> str:
-    """Build the full system prompt with role info, rules, and strategy."""
+    """Build the full system prompt with role info, rules, and strategy.
+
+    ``send_images`` controls the "YOUR VISION" section: when True (default)
+    the prompt tells the agent it receives a global-map image and a local-view
+    image each tick. When False (text-only ablation) the prompt instead
+    explains that all spatial information is provided as structured text, so
+    the model is not told to look for images that were never attached.
+    """
 
     role_display = "Goose (Innocent)" if team == "goose" else "Duck (Impostor)"
     strategy = _GOOSE_STRATEGY if team == "goose" else _DUCK_STRATEGY
@@ -137,6 +145,26 @@ def build_system_prompt(
         team_info += f"\nAll players in this game: {', '.join(all_players)}."
     if teammates and team == "duck":
         team_info += f"\nYour Duck teammates: {', '.join(teammates)}. Protect them."
+
+    if send_images:
+        vision_info = (
+            "YOUR VISION: You receive two images each tick:\n"
+            "1. A global map showing the ship's room layout and your task "
+            "locations (marked with your color). You CANNOT see other players "
+            "on this map.\n"
+            "2. A local view showing ONLY your current room and its immediate "
+            "surroundings — players and bodies you can actually see right "
+            "now.\n\n"
+        )
+    else:
+        vision_info = (
+            "YOUR VISION: All spatial information is provided to you as "
+            "structured text (no images). Each tick you are told your current "
+            "room, the adjacent rooms and travel times, your task locations, "
+            "and the players and bodies you can actually see right now. Use "
+            "this text description to reason about the ship layout and who is "
+            "around you.\n\n"
+        )
 
     return (
         f"You are {player_name}, playing Goose Goose Duck — a social deduction game "
@@ -160,11 +188,7 @@ def build_system_prompt(
         f"and all bodies are cleared.\n"
         f"- Geese win by completing all tasks OR voting out all Ducks.\n"
         f"- Ducks win when they reach voting majority (Ducks ≥ Geese).\n\n"
-        f"YOUR VISION: You receive two images each tick:\n"
-        f"1. A global map showing the ship's room layout and your task locations "
-        f"(marked with your color). You CANNOT see other players on this map.\n"
-        f"2. A local view showing ONLY your current room and its immediate "
-        f"surroundings — players and bodies you can actually see right now.\n\n"
+        f"{vision_info}"
         f"{strategy}\n"
         f"RESPONSE FORMAT:\n"
         f"- For actions: respond with EXACTLY one action from the available list "
